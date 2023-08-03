@@ -1,0 +1,257 @@
+---
+title: "Gun-violence-app"
+output: html_document
+date: "2023-08-02"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE,message = FALSE, warning = FALSE,out.width = "70%", out.height = "70%")
+```
+
+```{r, message=FALSE}
+library(tidyverse)
+library(shiny)
+library(usmap)
+library(sp)
+library(sf)
+```
+
+
+
+```{r}
+gun_vio_data<-read.csv("gun-violence-data_01-2013_03-2018.csv")
+
+gun_vio_data<-gun_vio_data[1:10000,]
+```
+
+```{r}
+#split the columns into values separated by |
+splitvector <- function(row){
+  temp_row <-unlist(strsplit(row,"|",fixed = T))
+  return (temp_row[temp_row != ""])
+}
+
+#Getting the position of the word in the list
+find_index <- function(row,word){
+  return (grep(word,splitvector(row)))
+}
+
+
+#Getting the actual number of the word on the list
+actual_index<- function(row,word){
+  return (as.numeric(sapply(splitvector(row)[find_index(row,word)],
+                 substring,first = 1,
+                 last = (min(find_index(row,word)-1)%/% 10)+1 )))
+}
+
+#Count the number of the parameters needed in a row
+count_values<- function(row,type = "Victim",age_group="Adult",gender = "Male",
+                        status = "Killed"){
+  return (length(intersect(actual_index(row[26], type),
+                           intersect(actual_index(row[22],gender),
+                           intersect(actual_index(row[21],age_group),
+                                     actual_index(row[25],status))))))
+}
+```
+
+```{r}
+type_parameters <- c("Suspect","Victim")
+age_group_parameters <- c("Adult","Teen","Child")
+gender_parameters <- c("Male","Female")
+status_parameters <- c("Injured","Killed","Unharmed","Arrested")
+date_range<- seq(min(as.Date(gun_vio_data$date)),max(as.Date(gun_vio_data$date)), by='days')
+```
+
+```{r}
+#setting up the app
+ui<- fluidPage(
+  titlePanel("Gun Violence Data"),
+  sidebarLayout(
+    sidebarPanel(
+      selectizeInput("states","Choose the state involved",
+                     c("United States",sort(unique(gun_vio_data$state))),selected= "United States"),
+      helpText("Choosing United States shows all the states. Otherwise it will 
+               show the counts in the cities and counties of the given state"),
+      selectizeInput("type_parm","Choose what type of person to graph",type_parameters,
+                     selected = "Victim"),
+      selectizeInput("age_group_parm","Choose what age group to display",age_group_parameters,
+                     selected = "Adult"),
+      selectizeInput("gender_parm","Choose what sex to display",gender_parameters,
+                     selected = "Male"),
+      selectizeInput("status_parm","Choose what status to display",status_parameters,
+                     selected = "Killed"),
+      sliderInput("date_parm","Choose a range of dates to display",min(as.Date(gun_vio_data$date)),
+                  max(as.Date(gun_vio_data$date)),
+                  value = c(min(as.Date(gun_vio_data$date)),max(as.Date(gun_vio_data$date))))
+    ),
+    mainPanel(
+      tabsetPanel(type = "tabs",
+                  tabPanel("Map Plot", plotOutput("mapplot"),
+                           textOutput("maptxt")),
+                  tabPanel("Bar Plot", plotOutput("barplot"),
+                           textOutput("bartxt")),
+                  tabPanel("Table Plot", tableOutput("table"),
+                           textOutput("tabletxt")),
+                  tabPanel("Statistics", tableOutput("stats")),
+                  tabPanel("Info", textOutput("txt"))
+      )
+    )
+  )
+)
+```
+
+```{r}
+server <- function(input,output){
+  up_date_data<- reactive({gun_vio_data[between(as.Date(gun_vio_data$date),input$date_parm[1],
+                           input$date_parm[2]),]
+    })
+  #getting the counts of specific parameters
+  temp <- reactive({apply(up_date_data(),1,count_values,
+                type = input$type_parm,
+                age_group = input$age_group_parm,
+                gender = input$gender_parm,
+                status = input$status_parm)})
+  all_data <- reactive({new_frame <- data.frame(state =up_date_data()$state,
+                                                values = as.integer(temp()))
+  
+  new_frame})
+  all_sum_data <- reactive({summarise(all_data(),
+                              values = sum(values),
+                              .by = state)})
+  state_data <- reactive({
+    if (input$states != "United States"){
+      new_frame <- data.frame(state = up_date_data()$state,
+                              city_or_county=up_date_data()$city_or_county,
+                              lat = up_date_data()$latitude,
+                              lon = up_date_data()$longitude,
+                              values = as.integer(temp()))
+      new_frame <- new_frame[complete.cases(new_frame),]
+
+      new_frame2 <- {validate(
+        need(nrow(new_frame[(new_frame$state == input$states),]) != 0,
+             "Dataset is empty")
+      )
+        usmap_transform(new_frame[(new_frame$state == input$states),])}
+    }
+  })
+  
+  output$mapplot <- renderPlot({
+      if (input$states == "United States"){
+        plot_usmap(data = all_sum_data(),regions = "states",labels = T)+
+          scale_fill_continuous(low = "white",high = "red", 
+                                name = "Count", 
+                                label = scales::comma)+
+          ggtitle(paste("Number of",
+                        str_to_lower(input$gender_parm),
+                        str_to_lower(input$age_group_parm),
+                        str_to_lower(paste(input$type_parm,"s",sep ="")),"that are",
+                        str_to_lower(input$status_parm),
+                        "\nin relation to gun violence in the United States"))+
+          theme(plot.title = element_text(size=16))
+      } else{
+        plot_usmap("counties",include = state.abb[grep(input$states, state.name)])+
+          geom_point(data = state_data()[complete.cases(state_data()),],
+                     aes(x = x,y = y,size = factor(values),alpha = 0.5),
+                     color= 'red')+guides(alpha = FALSE)+
+          ggtitle(paste("Number of",
+                        str_to_lower(input$gender_parm),
+                        str_to_lower(input$age_group_parm),
+                        str_to_lower(paste(input$type_parm,"s",sep ="")),"that are",
+                        str_to_lower(input$status_parm),
+                        "\nin relation to gun violence in",input$states))+
+          theme(plot.title = element_text(size=16))+
+          guides(size = guide_legend(title = "count"))
+      }
+      
+    
+    })
+  output$barplot <- renderPlot({
+    if (input$states == "United States"){
+      ggplot(data = all_sum_data()[(all_sum_data()$values != 0),])+geom_col(aes(x= state,y = values)) +
+        coord_flip()+scale_x_discrete("state",
+                                      limits = sort(all_sum_data()$state, decreasing = T))+
+        ggtitle(paste("Number of",
+                      str_to_lower(input$gender_parm),
+                      str_to_lower(input$age_group_parm),
+                      str_to_lower(paste(input$type_parm,"s",sep ="")),"that are",
+                      str_to_lower(input$status_parm),
+                      "\nin relation to gun violence in the United States"))+
+        theme(plot.title = element_text(size=16))
+    }else {
+        if (nrow(state_data()[(state_data()$values != 0),]) != 0){
+      ggplot(data = state_data()[(state_data()$values != 0),])+geom_col(aes(x=city_or_county,y = values))+
+        coord_flip()+theme(axis.text.y = element_text(size = 20/nrow(state_data())+8))+
+        scale_x_discrete("city_or_county",limits = sort(unique(state_data()[(state_data()$values != 0),]$city_or_county), decreasing = T))+
+        ggtitle(paste("Number of",
+                      str_to_lower(input$gender_parm),
+                      str_to_lower(input$age_group_parm),
+                      str_to_lower(paste(input$type_parm,"s",sep ="")),"that are",
+                      str_to_lower(input$status_parm),
+                      "\nin relation to gun violence in",input$states))+
+        theme(plot.title = element_text(size=16))}
+      
+    }
+  })
+  
+
+  output$table <- renderTable({
+    if (input$states == "United States"){
+      arrange(all_sum_data()[(all_sum_data()$values != 0),],state)
+    } else {
+
+      arrange(summarize(state_data()[(state_data()$values != 0),],count = sum(values), .by=city_or_county),city_or_county)
+    }
+  })
+  output$stats <- renderTable({
+    if (input$states == "United States"){
+      as.array(summary(all_sum_data()[,c("values")]))
+    }else {
+      as.array(summary(state_data()[,c("values")]))
+    }
+  })
+  output$txt <- renderText({"This app shows the distribution of the people involved in a gun incident
+               in the United States. Because the original dataset is large, we will only restrict to the first 10000 entries. 
+               You can choose if you want to center focus on the United States or individual states.\n 
+                           There are four attributes to choose from: Person Type, Age Range, Gender and Status. 
+                           There are three different plots to visualize the data: a map plot, a bar plot and a table plot"})
+  output$maptxt <- renderText({
+    validate(
+      need((input$states != "United States"),"If any region of the map is grey, there is no information given")
+    )
+    })
+  
+  output$bartxt <- renderText({
+    validate(
+      if (input$states == "United States"){
+        "If the state is missing, then either there is no information 
+        or the count is zero"
+      } else {
+        if (nrow(state_data()) != 0){
+          "If the city or county is missing, then either there is 
+          no information or the count is zero"
+        }
+      }
+    )
+  })
+  
+  output$tabletxt <- renderText({validate(
+    if (input$states == "United States"){
+      "If the state is missing, then either there is no information 
+        or the count is zero"
+    } else {
+      if (nrow(state_data()) != 0){
+        "If the city or county is missing, then either there is 
+          no information or the count is zero"
+      }
+    }
+  )
+  })
+  
+}
+```
+
+
+```{r}
+shinyApp(ui = ui,server = server)
+```
+
